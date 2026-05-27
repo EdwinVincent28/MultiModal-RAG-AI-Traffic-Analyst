@@ -6,6 +6,7 @@ import time
 import json
 import redis
 import os
+from rembg import remove
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -21,7 +22,7 @@ stream_url = "https://www.youtube.com/watch?v=1EiC9bvVGnk"
 stream = CamGear(source=stream_url, stream_mode=True, logging=False, **options).start()
 
 
-model = YOLO("yolo26n.pt") 
+model = YOLO("yolov8n-seg.pt") 
 tracker_data = {}
 BUFFER = 100
 
@@ -43,6 +44,42 @@ def predict_exit_side(angle):
     elif angle >= 135 or angle <= -135: return "Left"
     elif -135 < angle < -45: return "Bottom"
     return "Center"
+
+def get_dominant_color(image):
+    if image is None or image.size == 0:
+        return "Unknown"
+
+    h, w = image.shape[:2]
+    cx1, cx2 = int(w * 0.3), int(w * 0.7)
+    cy1, cy2 = int(h * 0.3), int(h * 0.7)
+    center_crop = image[cy1:cy2, cx1:cx2]
+    
+    if center_crop.size == 0: 
+        center_crop = image
+
+    avg_color = np.mean(center_crop, axis=(0, 1))
+    b, g, r = avg_color
+
+    colors = {
+        "Black": (30, 30, 30),
+        "White": (220, 220, 220),
+        "Silver": (150, 150, 150),
+        "Red": (40, 40, 200),
+        "Blue": (200, 40, 40),
+        "Green": (40, 200, 40),
+        "Yellow": (40, 200, 200)
+    }
+
+    best_color = "Unknown"
+    min_dist = float('inf')
+
+    for name, (cb, cg, cr) in colors.items():
+        dist = (b - cb)**2 + (g - cg)**2 + (r - cr)**2
+        if dist < min_dist:
+            min_dist = dist
+            best_color = name
+
+    return best_color
 
 frame_count = 0 
 
@@ -95,8 +132,8 @@ try:
                 cx, cy = (box[0]+box[2])/2, (box[1]+box[3])/2
 
                 x1, y1, x2, y2 = map(int, box)
-                crop_y1, crop_y2 = max(0, y1-10), min(h, y2+10)
-                crop_x1, crop_x2 = max(0, x1-10), min(w, x2+10)
+                crop_y1, crop_y2 = max(0, y1-25), min(h, y2+25)
+                crop_x1, crop_x2 = max(0, x1-25), min(w, x2+25)
                 vehicle_crop = frame[crop_y1:crop_y2, crop_x1:crop_x2]
 
                 if vid not in tracker_data:
@@ -151,9 +188,26 @@ try:
                         current_sec = int(current_time)
                         
                         latest_frame_key = f"traffic:frame:{current_sec}_vid{vid}"
-                        
+                        color_label = "Unknown"
+
                         if data['best_crop'] is not None and data['best_crop'].size > 0:
-                            success, buffer = cv2.imencode('.jpg', data['best_crop'])
+                            color_label = get_dominant_color(data['best_crop'])
+
+                            bg_removed = remove(
+                                data['best_crop'], 
+                                alpha_matting=True, 
+                                alpha_matting_foreground_threshold=240,
+                                alpha_matting_background_threshold=10,
+                                alpha_matting_erode_size=5
+                            )
+
+                            black_bg = np.zeros_like(data['best_crop'])
+                            alpha = bg_removed[:, :, 3] / 255.0
+                            for c in range(3):
+                                black_bg[:, :, c] = (alpha * bg_removed[:, :, c] + 
+                                                    (1 - alpha) * black_bg[:, :, c])
+                            
+                            success, buffer = cv2.imencode('.jpg', black_bg)
                             if success:
                                 frame_bytes = buffer.tobytes()
                                 r_img.setex(latest_frame_key, 3600, frame_bytes)
@@ -161,6 +215,7 @@ try:
                         event = {
                             "vehicle_id": int(vid),
                             "class": data['cls'],
+                            "color": color_label,
                             "entry_side": data['ent_side'],                  
                             "entry_angle": data['ent_angle'],
                             "entry_time": data['ent_time'],
@@ -182,7 +237,7 @@ try:
                             })
                             pipe.incr(f"traffic:count:{data['cls']}")
                             pipe.execute()
-                            print(f"[REDIS ✓] SAVED: ID: {vid} | Cat: {data['cls']} | Ent: {data['ent_side']} ({data['ent_angle']}°) | Ext: {exit_side} ({ext_angle}°)")
+                            print(f"[REDIS ✓] SAVED: ID: {vid} | Cat: {data['cls']} | Ent: {data['ent_side']} ({data['ent_angle']}°) | Ext: {exit_side} ({ext_angle}°) | Color: {color_label}")
                         except redis.exceptions.ConnectionError:
                             print("[ERROR] Could not connect to Redis!")
 
