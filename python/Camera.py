@@ -6,7 +6,6 @@ import time
 import json
 import redis
 import os
-from rembg import remove
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -49,37 +48,61 @@ def get_dominant_color(image):
     if image is None or image.size == 0:
         return "Unknown"
 
-    h, w = image.shape[:2]
-    cx1, cx2 = int(w * 0.3), int(w * 0.7)
-    cy1, cy2 = int(h * 0.3), int(h * 0.7)
-    center_crop = image[cy1:cy2, cx1:cx2]
+    hsv_img = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     
-    if center_crop.size == 0: 
-        center_crop = image
-
-    avg_color = np.mean(center_crop, axis=(0, 1))
-    b, g, r = avg_color
-
-    colors = {
-        "Black": (30, 30, 30),
-        "White": (220, 220, 220),
-        "Silver": (150, 150, 150),
-        "Red": (40, 40, 200),
-        "Blue": (200, 40, 40),
-        "Green": (40, 200, 40),
-        "Yellow": (40, 200, 200)
+    v_channel = hsv_img[:, :, 2]
+    valid_mask = v_channel > 15
+    
+    valid_pixels = hsv_img[valid_mask]
+    
+    if len(valid_pixels) == 0:
+        return "Black"
+        
+    h = valid_pixels[:, 0]
+    s = valid_pixels[:, 1]
+    v = valid_pixels[:, 2]
+    
+    # Catch pixels that are technically blue, but are too dark/desaturated to be real paint.
+    is_fake_blue = (h >= 85) & (h < 140) & (s < 90) & (v < 110)
+    
+    # Give the Black bucket a slightly higher base threshold, and feed it the Fake Blue votes!
+    is_black = (v < 55) | is_fake_blue
+    
+    is_white = (s < 45) & (v > 140) & ~is_black
+    is_silver = (s < 45) & (v <= 140) & ~is_black
+    
+    is_colored = (s >= 45) & ~is_black
+    
+    is_red = is_colored & ((h < 10) | (h > 165))
+    is_yellow = is_colored & (h >= 10) & (h < 35)
+    is_green = is_colored & (h >= 35) & (h < 85)
+    is_blue = is_colored & (h >= 85) & (h < 140) # Only REAL blue paint gets to vote here
+    
+    # 3. COUNT THE VOTES
+    counts = {
+        "Black": np.sum(is_black),
+        "White": np.sum(is_white),
+        "Silver": np.sum(is_silver),
+        "Red": np.sum(is_red),
+        "Yellow": np.sum(is_yellow),
+        "Green": np.sum(is_green),
+        "Blue": np.sum(is_blue)
     }
-
-    best_color = "Unknown"
-    min_dist = float('inf')
-
-    for name, (cb, cg, cr) in colors.items():
-        dist = (b - cb)**2 + (g - cg)**2 + (r - cr)**2
-        if dist < min_dist:
-            min_dist = dist
-            best_color = name
-
-    return best_color
+    
+    # 4. DECIDE THE WINNER
+    total_pixels = len(valid_pixels)
+    color_votes = counts["Red"] + counts["Yellow"] + counts["Green"] + counts["Blue"]
+    
+    # THE 15% RULE:
+    # If at least 15% of the car's body is a vibrant color, it is a colored car.
+    if total_pixels > 0 and (color_votes / total_pixels) > 0.15:
+        # Find the color with the most votes
+        color_candidates = {k: counts[k] for k in ["Red", "Yellow", "Green", "Blue"]}
+        return max(color_candidates, key=color_candidates.get)
+    else:
+        # If there is no vibrant color, it is a Grayscale car
+        grayscale_candidates = {k: counts[k] for k in ["Black", "White", "Silver"]}
+        return max(grayscale_candidates, key=grayscale_candidates.get)
 
 frame_count = 0 
 
@@ -98,7 +121,7 @@ try:
             continue
 
         
-        h, w = frame.shape[:2]
+        h_frame, w_frame = frame.shape[:2]
         current_time = time.time()
 
         results = model.track(
@@ -124,27 +147,44 @@ try:
             break
 
         boxes = results[0].boxes
+        masks = results[0].masks
         
         if boxes.id is not None:
             active_ids = boxes.id.cpu().tolist()
+            polygons = masks.xy if masks is not None else []
             
-            for vid, box, cls_idx in zip(active_ids, boxes.xyxy.cpu().tolist(), boxes.cls.cpu().tolist()):
+            for idx, (vid, box, cls_idx) in enumerate(zip(active_ids, boxes.xyxy.cpu().tolist(), boxes.cls.cpu().tolist())):
                 cx, cy = (box[0]+box[2])/2, (box[1]+box[3])/2
-
                 x1, y1, x2, y2 = map(int, box)
-                crop_y1, crop_y2 = max(0, y1-25), min(h, y2+25)
-                crop_x1, crop_x2 = max(0, x1-25), min(w, x2+25)
-                vehicle_crop = frame[crop_y1:crop_y2, crop_x1:crop_x2]
+                
+                # Small padding is fine now because the mask is highly accurate
+                crop_y1, crop_y2 = max(0, y1-5), min(h_frame, y2+5)
+                crop_x1, crop_x2 = max(0, x1-5), min(w_frame, x2+5)
+
+                # --- NEW: APPLY SEGMENTATION MASK TO CUT OUT VEHICLE ---
+                poly = polygons[idx] if idx < len(polygons) else None
+                
+                if poly is not None and len(poly) > 0:
+                    # 1. Create empty black canvas
+                    frame_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+                    # 2. Draw the exact polygon outline in white
+                    cv2.fillPoly(frame_mask, [np.array(poly, dtype=np.int32)], 255)
+                    # 3. Punch out the car (turns everything else pitch black)
+                    masked_frame = cv2.bitwise_and(frame, frame, mask=frame_mask)
+                    # 4. Crop to the box size
+                    vehicle_crop = masked_frame[crop_y1:crop_y2, crop_x1:crop_x2]
+                else:
+                    vehicle_crop = frame[crop_y1:crop_y2, crop_x1:crop_x2]
 
                 if vid not in tracker_data:
                     tracker_data[vid] = {
                         'cls': model.names[int(cls_idx)], 
                         'ent_angle': None,
-                        'ent_side': get_side(cx, cy, w, h), 
+                        'ent_side': get_side(cx, cy, w_frame, h_frame), 
                         'path': [(cx, cy)], 
                         'ent_time': time.strftime("%H:%M:%S"),
                         'last_seen_time': time.strftime("%H:%M:%S"),
-                        'missing_frames': 0,  # Initialize grace period timer
+                        'missing_frames': 0,
                         'last_crop': vehicle_crop,
                         'best_crop': vehicle_crop,
                         'best_area': (x2 - x1) * (y2 - y1)
@@ -156,18 +196,16 @@ try:
                     tracker_data[vid]['last_crop'] = vehicle_crop
 
                     current_area = (x2 - x1) * (y2 - y1)
-
                     if current_area > tracker_data[vid]['best_area']:
                         tracker_data[vid]['best_area'] = current_area
                         tracker_data[vid]['best_crop'] = vehicle_crop
-
                     
                     if tracker_data[vid]['ent_angle'] is None and len(tracker_data[vid]['path']) > 3:
                         dist_sq = (cx - tracker_data[vid]['path'][0][0])**2 + (cy - tracker_data[vid]['path'][0][1])**2
-                        if dist_sq > 100: #(10 pixels of movement)
+                        if dist_sq > 100: 
                             tracker_data[vid]['ent_angle'] = get_heading(tracker_data[vid]['path'][0], (cx, cy))
         else:
-            active_ids = [] # Screen is empty!
+            active_ids = []
 
         # --- Grace Period & Exit Logic ---
         for vid in list(tracker_data.keys()):
@@ -193,21 +231,7 @@ try:
                         if data['best_crop'] is not None and data['best_crop'].size > 0:
                             color_label = get_dominant_color(data['best_crop'])
 
-                            bg_removed = remove(
-                                data['best_crop'], 
-                                alpha_matting=True, 
-                                alpha_matting_foreground_threshold=240,
-                                alpha_matting_background_threshold=10,
-                                alpha_matting_erode_size=5
-                            )
-
-                            black_bg = np.zeros_like(data['best_crop'])
-                            alpha = bg_removed[:, :, 3] / 255.0
-                            for c in range(3):
-                                black_bg[:, :, c] = (alpha * bg_removed[:, :, c] + 
-                                                    (1 - alpha) * black_bg[:, :, c])
-                            
-                            success, buffer = cv2.imencode('.jpg', black_bg)
+                            success, buffer = cv2.imencode('.jpg', data['best_crop'])
                             if success:
                                 frame_bytes = buffer.tobytes()
                                 r_img.setex(latest_frame_key, 3600, frame_bytes)
