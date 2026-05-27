@@ -25,6 +25,7 @@ function buildSentence(doc, weather) {
     const cls        = (doc.class || 'vehicle').toLowerCase();
     const entryTime  = doc.entry_time || '00:00:00';
     const exitTime   = doc.exit_time  || '00:00:00';
+    const colorText  = (doc.color && doc.color !== 'Unknown') ? `${doc.color.toLowerCase()} ` : '';
 
     const dwellSec = Math.max(
         timeToSeconds(exitTime) - timeToSeconds(entryTime),
@@ -45,7 +46,7 @@ function buildSentence(doc, weather) {
     }
 
     return (
-        `A ${cls} entered from the ${entryDir} at ${entryAngle}° at ${entryTime}, ` +
+        `A ${colorText}${cls} entered from the ${entryDir} at ${entryAngle}° at ${entryTime}, ` +
         `${movement}, and exited at ${exitAngle}° at ${exitTime}. ` +
         `It was visible for ${dwellSec} seconds.` +
         weatherClause

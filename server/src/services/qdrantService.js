@@ -18,6 +18,7 @@ async function ensureCollections() {
         });
         for (const [field, type] of [
             ['vehicle_class', 'keyword'],
+            ['vehicle_color', 'keyword'],
             ['hour_of_day',   'integer'],
             ['weather_code',  'integer'],
             ['timestamp',     'float'  ],
@@ -48,6 +49,7 @@ async function upsertVehicle(event, sentence, textVector, imageVector, weather) 
                 mongo_id:          event._id.toString(),
                 vehicle_id:        event.vehicle_id,
                 vehicle_class:     event.class,
+                vehicle_color:     event.color || "Unknown",
                 sentence:          sentence,
                 image_path:        event.image_path ?? null, // Image path stored right here!
                 entry_time:        event.entry_time,
