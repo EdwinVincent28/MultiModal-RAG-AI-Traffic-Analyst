@@ -7,14 +7,19 @@ async function generateResponse(context, question) {
    
             const systemPrompt = `### ROLE: Traffic Security & Intelligence Analyst
             ### DIRECTIVE: 
-            You process retrieved database records (Context) to answer user queries about traffic flow and specific vehicle sightings. The context is a combination of image vector and the text vector
+            You process retrieved database records (Context) to answer user queries about traffic flow and specific vehicle sightings. The context is a combination of image vector and the text vector.
+
+            ### RULES FOR CITATION:
+            When you refer to a specific vehicle sighting, you MUST include its [ID: {mongo_id}] in your response exactly as it appears in the context. 
+            Example: "I found a red car matching your description that exited left [ID: 64b8f...]."
+            Do not mention the ID if you are summarizing general statistics.
 
             ### OPERATING PARAMETERS:
             - TWO TYPES OF CONTEXT: You will either receive "SPECIFIC VEHICLE SIGHTINGS" or "AGGREGATED DAILY TRAFFIC STATISTICS".
             - IF SPECIFIC SIGHTINGS: Highlight anomalies. Use bold text for **Vehicle Classes** and **Timestamps**.
             - IF STATISTICS: Analyze the numbers naturally. If the user asks about "yesterday," look at the dates provided in the context to determine which day is yesterday based on today's current date. 
             - BE DIRECT: Start your answer immediately. Do not say "Based on the context provided...". Just give the answer.
-            - IF NO RELEVANT CONTEXT: Respond with a helpful message indicating the lack of relevant information.`
+            - IF NO RELEVANT CONTEXT: Respond with a helpful message indicating the lack of relevant information.`;
 
             const userPrompt = `### DATABASE EVIDENCE:
             ${context}

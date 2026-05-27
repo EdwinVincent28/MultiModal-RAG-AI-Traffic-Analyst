@@ -176,20 +176,36 @@ export default function Chatbot({ trafficContext = {} }) {
 			setPendingImage(null);
 
 			try {
-				// Updated call
-				const data = await callChatAPI(nextMessages, imageToSend);
+                const data = await callChatAPI(nextMessages, imageToSend);
 
-				setMessages((prev) => [
-					...prev,
-					{
-						role: "assistant",
-						content: data.reply,
-						// Grab the first evidence image URL if it exists
-						evidenceUrl: data.evidenceImages?.[0]?.url || null,
-						ts: Date.now(),
-					},
-				]);
-			} catch (err) {
+                let cleanReply = data.reply;
+                let matchedEvidenceUrl = null;
+
+                const idMatch = data.reply.match(/\[ID:\s*([a-fA-F0-9]{24})\]/);
+
+                if (idMatch) {
+                    const mongoId = idMatch[1];
+                    
+                    const exactImage = data.evidenceImages?.find(img => img.mongo_id === mongoId);
+                    
+                    if (exactImage) {
+                        matchedEvidenceUrl = exactImage.url;
+                    }
+                    cleanReply = data.reply.replace(/\[ID:\s*[a-fA-F0-9]{24}\]/g, "").trim();
+                } else if (data.evidenceImages?.length > 0 && !data.reply.includes("STATISTICS")) {
+                    matchedEvidenceUrl = data.evidenceImages[0].url;
+                }
+
+                setMessages((prev) => [
+                    ...prev,
+                    {
+                        role: "assistant",
+                        content: cleanReply,
+                        evidenceUrl: matchedEvidenceUrl,
+                        ts: Date.now(),
+                    },
+                ]);
+            } catch (err) {
 				setMessages((prev) => [
 					...prev,
 					{ role: "error", content: err.message, ts: Date.now() },

@@ -77,7 +77,7 @@ async function processChatRequest(imageBuffer, userQuestion) {
             return { answer: "I couldn't find any relevant data.", evidenceImages: [] };
         }
 
-        context = matches.map(m => m.sentence).join('\n');
+        context = matches.map(m => `[ID: ${m.mongo_id}] ${m.sentence}`).join('\n');
         
 
         const evidenceUrl = `${baseUrl}/${matches.imagePath}`;
