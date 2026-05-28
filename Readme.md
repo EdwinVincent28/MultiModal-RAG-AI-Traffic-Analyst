@@ -10,11 +10,11 @@ Built as a university project at **SRH Heidelberg University of Applied Sciences
 
 The system operates as a continuous pipeline across three layers.
 
-**Perception** — A Python script reads a live YouTube traffic stream via VidGear, runs YOLOv8 object detection on every 4th frame, tracks vehicles across frames using a custom ByteTrack configuration, and computes entry/exit angles, sides, and dwell times. When a vehicle exits the frame, the event JSON and the cropped JPEG are pushed into Redis as separate keys.
+**Perception** — A Python script reads a live YouTube traffic stream via VidGear, runs YOLOv8-seg instance segmentation on every 4th frame, tracks vehicles using ByteTrack, and isolates the vehicle using polygon masks on a pure black background. It computes HSV color profiles, entry/exit angles, and dwell times. When a vehicle exits, the event JSON and the perfectly masked JPEG crop are pushed into Redis.
 
 **Storage & Enrichment** — A Node.js backend drains Redis every 5 seconds. Each event is enriched with real-time weather data from Open-Meteo, persisted to MongoDB, and written as a JPEG to local disk. A natural language sentence is generated from the event fields, embedded by `all-MiniLM-L6-v2` (384-dim), and combined with the CLIP image vector (512-dim) into a single unified Qdrant point using named vectors. Aggregates are updated across four time granularities: minute, hourly, daily, and weekly.
 
-**Intelligence** — A multimodal RAG endpoint accepts text, image, or both. A keyword router decides whether to query Qdrant (semantic + visual retrieval) or MongoDB (aggregated statistics). Retrieved context is passed to Groq's `llama-3.3-70b-versatile` for natural language answers. A live MJPEG stream endpoint serves the annotated camera frame from Redis at 10fps to the React frontend.
+**Intelligence** — A multimodal RAG endpoint accepts text, image, or both. An Agentic LangGraph state machine utilizes a zero-shot LLM router to autonomously classify user intent, dynamically routing the query to either Qdrant (semantic + visual retrieval) or MongoDB (aggregated statistics). Retrieved context is injected with exact MongoDB ObjectIDs, forcing Groq's llama-3.3-70b-versatile to perfectly cite its sources for flawless frontend visual matching.
 
 ---
 
@@ -46,11 +46,11 @@ Aggregation (every event)
         │
         ▼
 RAG Chat Endpoint  POST /api/chat
-  ├── Keyword router
-  │     ├── QDRANT_RAG   → searchMultimodal(imageVector, textVector)
-  │     │                   score fusion + deduplication → top 5
-  │     └── MONGODB_STATS → TrafficStats.find() last 7 daily buckets
-  └── Groq LLM (llama-3.3-70b-versatile) → natural language answer
+  └── LangGraph Agentic Workflow
+        ├── Router Node (Zero-shot LLM Intent Classification)
+        │     ├── QDRANT Node → searchMultimodal(image, text) + deduplication
+        │     └── MONGODB Node → TrafficStats.find() daily buckets
+        └── Synthesizer Node (Groq llama-3.3-70b-versatile) → Cited Answer
 
 Live Stream Endpoint  GET /api/traffic/stream
   └── Redis traffic:frame:live → MJPEG multipart stream → React
@@ -62,7 +62,7 @@ Live Stream Endpoint  GET /api/traffic/stream
 
 | Layer | Technology |
 |---|---|
-| Computer vision | Python, OpenCV, YOLOv8 (Ultralytics), VidGear |
+| Computer vision | Python, OpenCV, YOLOv8-seg (Ultralytics), VidGear |
 | Object tracking | Custom ByteTrack YAML |
 | Image format conversion | Jimp (PNG/WebP → JPEG before CLIP) |
 | Event queue | Redis (binary image store + event list) |
@@ -73,7 +73,7 @@ Live Stream Endpoint  GET /api/traffic/stream
 | Text embeddings | `Xenova/all-MiniLM-L6-v2` — 384-dim, runs locally |
 | Image embeddings | `Xenova/clip-vit-base-patch32` — 512-dim, runs locally |
 | Weather enrichment | Open-Meteo API (free, no key required) |
-| LLM | Groq API (`llama-3.3-70b-versatile`) |
+| LLM | Groq API (`llama-3.3-70b-versatile`) | LangGraph
 | Frontend | React |
 | Infrastructure | Docker Compose |
 
@@ -196,7 +196,7 @@ Collection: vehicle_events
     text:  384-dim (all-MiniLM-L6-v2)  — semantic sentence search
     image: 512-dim (CLIP ViT-B/32)      — visual similarity search
   payload:
-    mongo_id, vehicle_id, vehicle_class
+    mongo_id, vehicle_id, vehicle_class, vehicle_color
     sentence, image_path
     entry_time, exit_time, entry_angle, exit_angle, entry_side, exit_side
     timestamp, hour_of_day
@@ -239,10 +239,11 @@ Each bucket tracks: vehicle count by class, total count, total travel time (for 
 | `question` | string | Natural language question (optional if image provided) |
 | `image` | file | JPEG, PNG, or WebP vehicle image (optional if question provided) |
 
-The service automatically routes the query:
+The service utilizes a LangGraph State Machine to autonomously route the query:
 
-- Questions containing `how many`, `count`, `total`, `average`, `stats`, `yesterday`, `today`, or `week` → **MongoDB stats route** (last 7 daily buckets)
-- Everything else → **Qdrant RAG route** (semantic + visual retrieval)
+MongoDB Stats Route: The LLM agent detects requests for statistics, historical aggregations, averages, or counts, and triggers the MongoDB node to fetch the last 7 daily buckets.
+
+Qdrant RAG Route: The agent detects requests for visual characteristics, specific events, or descriptions, and triggers the multimodal Qdrant node for semantic/visual similarity search.
 
 ```bash
 # Text only — routed to MongoDB stats
@@ -303,7 +304,7 @@ curl -X POST http://localhost:5000/api/chat \
 Raw event fields are converted to a sentence before embedding:
 
 ```
-"A car entered from the South at -166.0° at 13:27:13, continued straight 
+"A red car entered from the South at -166.0° at 13:27:13, continued straight 
 through, and exited at -163.4° at 13:27:19. It was visible for 6 seconds. 
 The weather was partly cloudy at 18°C."
 ```
